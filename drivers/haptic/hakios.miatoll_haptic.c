@@ -28,6 +28,7 @@
  * a byte nobody acknowledges, and the chip goes into reset for the rest of the run, as it does at the run's end.
  */
 #include <kern/clock.h>
+#include <libkern/OSAtomic.h>
 #include <kern/thread.h>
 #include <libkern/libkern.h>
 #include <mach/mach_types.h>
@@ -102,6 +103,31 @@ wait_ms(uint32_t ms)
 	} else {
 		delay_for_interval(ms, NSEC_PER_MSEC);
 	}
+}
+
+/*
+ * I2C 4 (GPIO 115/116) is shared: the vibration motor's AW8624 (devices/miatoll/drivers/haptic) and, on some of these
+ * phones, the speaker's TAS2562 (devices/miatoll/drivers/audio) are both on it, each driven by hand from a thread of
+ * its own. A transaction holds the bus: this word, taken with a compare-and-swap (both files define it, weak: one).
+ */
+__attribute__((weak)) volatile UInt32 hakios_miatoll_i2c4_busy = 0;
+
+static bool
+i2c4_hold(void)
+{
+	for (unsigned waited = 0; waited < 4000; waited++) {           /* 200 ms at most */
+		if (OSCompareAndSwap(0, 1, &hakios_miatoll_i2c4_busy)) {
+			return true;
+		}
+		spin_us(50);
+	}
+	return false;
+}
+
+static void
+i2c4_release(void)
+{
+	OSCompareAndSwap(1, 0, &hakios_miatoll_i2c4_busy);
 }
 
 /* ---- pins ------------------------------------------------------------------------------------------ */
@@ -229,6 +255,10 @@ static uint32_t taken_cfg[2], taken_io[2];
 static bool
 bus_take(void)
 {
+	if (!i2c4_hold()) {
+		say("haptic: I2C 4 stays busy (the speaker's amplifier?): this transaction is not made\n");
+		return false;
+	}
 	taken_cfg[0] = rd(GPIO_CFG(PIN_SDA));
 	taken_cfg[1] = rd(GPIO_CFG(PIN_SCL));
 	taken_io[0] = rd(GPIO_IO(PIN_SDA));
@@ -243,6 +273,7 @@ bus_take(void)
 		wr(GPIO_CFG(PIN_SCL), taken_cfg[1]);
 		say("haptic: the I2C bus is not at rest (gpio%u reads %u, gpio%u reads %u): not touched\n", PIN_SDA,
 		    level_of(PIN_SDA), PIN_SCL, level_of(PIN_SCL));
+		i2c4_release();
 		return false;
 	}
 	return true;
@@ -255,6 +286,7 @@ bus_give_back(void)
 	wr(GPIO_IO(PIN_SCL), taken_io[1] & 2);
 	wr(GPIO_CFG(PIN_SDA), taken_cfg[0]);
 	wr(GPIO_CFG(PIN_SCL), taken_cfg[1]);
+	i2c4_release();
 }
 
 #define AW_ADDRESS              0x5a

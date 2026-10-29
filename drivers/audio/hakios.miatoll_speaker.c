@@ -24,6 +24,7 @@
  * way out.
  */
 #include <kern/clock.h>
+#include <libkern/OSAtomic.h>
 #include <kern/thread.h>
 #include <libkern/libkern.h>
 #include <mach/mach_types.h>
@@ -92,6 +93,31 @@ wait_ms(uint32_t ms)
 	} else {
 		delay_for_interval(ms, NSEC_PER_MSEC);
 	}
+}
+
+/*
+ * I2C 4 (GPIO 115/116) is shared: the vibration motor's AW8624 (devices/miatoll/drivers/haptic) and, on some of these
+ * phones, the speaker's TAS2562 (devices/miatoll/drivers/audio) are both on it, each driven by hand from a thread of
+ * its own. A transaction holds the bus: this word, taken with a compare-and-swap (both files define it, weak: one).
+ */
+__attribute__((weak)) volatile UInt32 hakios_miatoll_i2c4_busy = 0;
+
+static bool
+i2c4_hold(void)
+{
+	for (unsigned waited = 0; waited < 4000; waited++) {           /* 200 ms at most */
+		if (OSCompareAndSwap(0, 1, &hakios_miatoll_i2c4_busy)) {
+			return true;
+		}
+		spin_us(50);
+	}
+	return false;
+}
+
+static void
+i2c4_release(void)
+{
+	OSCompareAndSwap(1, 0, &hakios_miatoll_i2c4_busy);
 }
 
 /* ---- pins: the TLMM's tiles, 0x1000 a pin ---------------------------------------------------------- */
@@ -213,6 +239,9 @@ i2c_read(struct bus *b, bool more)
 static bool
 bus_take(struct bus *b)
 {
+	if (b->sda == 115 && !i2c4_hold()) {
+		return false;
+	}
 	b->taken_cfg[0] = rd(CFG(*b->tile, b->sda));
 	b->taken_cfg[1] = rd(CFG(*b->tile, b->scl));
 	b->taken_io[0] = rd(IO(*b->tile, b->sda));
@@ -225,6 +254,9 @@ bus_take(struct bus *b)
 		wr(IO(*b->tile, b->scl), b->taken_io[1] & 2);
 		wr(CFG(*b->tile, b->sda), b->taken_cfg[0]);
 		wr(CFG(*b->tile, b->scl), b->taken_cfg[1]);
+		if (b->sda == 115) {
+			i2c4_release();
+		}
 		return false;
 	}
 	return true;
@@ -237,6 +269,9 @@ bus_give_back(struct bus *b)
 	wr(IO(*b->tile, b->scl), b->taken_io[1] & 2);
 	wr(CFG(*b->tile, b->sda), b->taken_cfg[0]);
 	wr(CFG(*b->tile, b->scl), b->taken_cfg[1]);
+	if (b->sda == 115) {
+		i2c4_release();
+	}
 }
 
 static bool
