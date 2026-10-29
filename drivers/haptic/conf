@@ -1,0 +1,6 @@
+# devices/miatoll/drivers/haptic/conf: miatoll's vibration motor.
+
+driver MIATOLL_HAPTIC
+	file    bsd/dev/hakios.miatoll_haptic.c
+	help    the vibration motor: an Awinic AW8624 on I2C 4 driving a linear resonant actuator (aw8624=N; the loader drops haptic= on miatoll; as the POCO's
+	help    hakios.haptic.c), Android's waveforms from fw-haptic/aw8624_haptic.bin
