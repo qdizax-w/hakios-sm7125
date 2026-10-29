@@ -24,8 +24,9 @@
  *              HAPTIC_MAX_MS at most
  *
  * Limits as the POCO's: Android's own waveforms and gain only; no effect longer than HAPTIC_MAX_MS; any fault
- * the chip reports (over- or under-voltage, over-current, over-temperature), a write that does not read back or
- * a byte nobody acknowledges, and the chip goes into reset for the rest of the run, as it does at the run's end.
+ * the chip reports (over-voltage, over-current, over-temperature; its under-voltage flag, which it latches at power-up
+ * and in standby, is only noted, as Xiaomi's driver notes it), a write that does not read back or a byte nobody
+ * acknowledges, and the chip goes into reset for the rest of the run, as it does at the run's end.
  */
 #include <kern/clock.h>
 #include <libkern/OSAtomic.h>
@@ -360,7 +361,8 @@ regs_write(uint8_t reg, const uint8_t *values, unsigned count)
 #define SYSCTRL_RAMINIT         0x20
 #define SYSCTRL_PLAY_MODE       0x0c
 #define SYSCTRL_STANDBY         0x01
-#define SYSINT_FAULTS           0x66            /* over-voltage, under-voltage, over-current, over-temperature */
+#define SYSINT_FAULTS           0x46            /* over-voltage, over-current, over-temperature */
+#define SYSINT_UVLO             0x20            /* under-voltage: latched at power-up and in standby; Xiaomi's driver only logs it */
 #define GAIN                    0x80            /* Xiaomi's (aw8624.c: aw8624_haptic_effect_strength) */
 #define SW_BRAKE                0x2c            /* the dtbo's vib_sw_brake */
 
@@ -447,6 +449,13 @@ healthy(const char *when)
 		    flags & 0x20 ? " UNDER-VOLTAGE" : "", flags & 0x04 ? " OVER-CURRENT" : "", flags & 0x02 ? " OVER-TEMPERATURE" : "");
 		give_up("a fault");
 		return false;
+	}
+	if (flags & SYSINT_UVLO) {
+		static unsigned said;
+
+		if (said++ < 3) {
+			say("haptic: %s: the chip's under-voltage flag is set (%#04x): noted, as Xiaomi's driver notes it\n", when, flags);
+		}
 	}
 	return true;
 }
