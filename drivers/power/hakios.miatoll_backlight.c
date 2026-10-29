@@ -356,17 +356,31 @@ backlight_thread(__unused void *parameter, __unused wait_result_t result)
 	}
 	say("backlight: the level is iOS's (/dev/hakios-backlight) from here on: %u now, %u to %u\n", shown_level, LEVEL_MIN,
 	    LEVEL_MAX);
+	/*
+	 * A new level is not jumped to but eased into: every 8 ms a quarter of the way there (at least 4 steps of
+	 * 4095), so a slider's levels, which come at whatever rate it is dragged and from more than one program,
+	 * make a smooth change of the light instead of a flicker of jumps.
+	 */
 	while (!broken) {
 		uint32_t want = wanted;
 
 		if (want != 0xffffffff && want != applied) {
-			if (!set_level(level_for(want))) {
-				break;
-			}
 			if (changes++ < 5 || changes % 50 == 0) {
-				say("backlight: iOS asks for %u of 1000: level %u\n", want, shown_level);
+				say("backlight: iOS asks for %u of 1000: level %u\n", want, level_for(want));
 			}
 			applied = want;
+		}
+		if (applied != 0xffffffff && shown_level != level_for(applied)) {
+			uint32_t target = level_for(applied), step;
+
+			step = (target > shown_level ? target - shown_level : shown_level - target) / 4;
+			step = step < 4 ? 4 : step;
+			if (!set_level(target > shown_level ? MIN(target, shown_level + step) :
+			    (shown_level > target + step ? shown_level - step : target))) {
+				break;
+			}
+			delay_for_interval(8, NSEC_PER_MSEC);
+			continue;
 		}
 		delay_for_interval(20, NSEC_PER_MSEC);
 	}
