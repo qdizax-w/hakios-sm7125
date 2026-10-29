@@ -1,0 +1,4 @@
+# HakiOS defconfig for the Redmi Note 9S / 9 Pro / Note 10 Lite / POCO M2 Pro (miatoll): the common kernel, the sm7125 family's facts, and this device's own.
+#include common_defconfig
+#include sm7125.config
+#include miatoll.config
