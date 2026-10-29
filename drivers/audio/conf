@@ -1,0 +1,6 @@
+# devices/miatoll/drivers/audio/conf: miatoll's speaker.
+
+driver MIATOLL_SPEAKER
+	file    bsd/dev/hakios.miatoll_speaker.c
+	help    the speaker's TI TAS2562 amplifier, on I2C 9 or 4 at 0x4c, for drivers/audio/hakios.sound.c (sound=N), which on
+	help    miatoll plays through the DSP's tertiary MI2S port: miatoll's side of what hakios.speaker.c is for the POCO
