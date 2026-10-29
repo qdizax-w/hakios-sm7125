@@ -1,0 +1,7 @@
+# devices/miatoll/drivers/input/conf: the touch screen of the Huaxing panel.
+# Drivers of this device alone; the mechanism is docs/drivers-config.md, the guide docs/porting/drivers.md.
+
+driver MIATOLL_TOUCH
+	file    bsd/dev/hakios.miatoll_touch.c
+	help    the touch screen of the Huaxing panel (Redmi Note 9S, 9 Pro, Note 10 Lite): a FocalTech FT8756 on SPI driven
+	help    by hand on GPIO 53-56, its firmware loaded at every boot from fw/ft8756.bin (ft8756=1)

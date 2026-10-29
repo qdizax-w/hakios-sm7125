@@ -1,97 +1,36 @@
-# Device: Qualcomm Technologies, Inc. ATOLL-AB SoC (miatoll)
+# hakios-sm7125: the Redmi Note 9S (miatoll, curtana) and its Snapdragon 720G (SM7125)
 
-Made by `tools/new-device.py` on 2026-10-29, from the file 2.dtb. Edit it as the port goes.
+One HakiOS device repository: the device (`device.conf`, `configs/`, `boot.conf`, its own drivers in `drivers/`, its UEFI port in
+`uefi/`) and its SoC family's layer (`soc/`: SM7125). It covers the phones that share the SoC: Redmi Note 9S / 9 Pro / 9 Pro Max,
+Redmi Note 10 Lite, POCO M2 Pro. It was made and tested on a 64 GB Redmi Note 9S with the Huaxing panel; the partition numbers
+below are that phone's. `tools/hakios-device.py sync` in the common repository clones it into `devices/miatoll/`.
 
-| What | Value |
+iOS 16.5 runs on it from the phone's own flash: the home screen, every stock Apple app, touch, brightness, the flashlight, the
+battery level, Sileo, SSH and internet over the USB cable. What does not (sound, vibration, Wi-Fi, camera, cellular) is in
+`device.conf`, area by area.
+
+## What is here
+
+| What | Where |
 |---|---|
-| Board (the tree's `model`) | Qualcomm Technologies, Inc. ATOLL-AB SoC |
-| Compatible | `qcom,atoll` |
+| the kernel's configuration | `configs/miatoll_defconfig` = common + `soc/configs/sm7125.config` + `configs/miatoll.config` |
+| the drivers of this phone alone | `drivers/input/hakios.miatoll_touch.c` (FT8756), `drivers/power/hakios.miatoll_battery.c` (PM6150 fuel gauge), `drivers/power/hakios.miatoll_backlight.c` (PM6150L WLED) |
+| what `xl` and the boot image need | `boot.conf`: the UEFI target, its addresses, the arguments only the drivers above read |
+| the UEFI | `uefi/`: Mu-Silicium **3.6** with the boot shim, the loader hook and the memory map (`apply.sh`); later releases do not boot these phones, and clang 18 builds it |
+| the touch screen's firmware | `tools/mk-fw-touch-miatoll.sh` (Xiaomi's, from their kernel source) |
+| the phone's own firmware | `pull-firmware.sh`: the GPU's, off your phone over `adb`. Not in the repository |
 
-## The SoC addresses
+The UEFI image itself is **not** in this repository: it holds Qualcomm's and Xiaomi's drivers. Build it on your computer
+(`uefi/apply.sh`, then Mu-Silicium's `build_uefi.py -d miatoll -m 0 -r RELEASE` with clang 18; `-m` is the model, 0 the Note 9S).
+`prebuilt/SHA256SUMS` has the checksum of the build that boots, because the same source built on another machine once did not.
 
-No reference tree to compare with (devices/redwood/prebuilt/device-tree.dtb is missing).
+## Setting up the phone (once)
 
-| Argument | Value | Against the reference |
-|---|---|---|
-| `soc_ipa_base` | `0x1e40000` |  |
-| `soc_gsi_base` | `0x1e04000` |  |
-| `soc_ipcc` | `(not found)` | **missing**: the tree has no node this was read from; see the table in devices/redwood/README.md |
-| `soc_aoss` | `0xc300000` |  |
-| `soc_rsc` | `(not found)` | **missing**: the tree has no node this was read from; see the table in devices/redwood/README.md |
-| `soc_apps_smmu` | `0x15000000` |  |
-| `soc_cmd_db` | `(not found)` | **missing**: the tree has no node this was read from; see the table in devices/redwood/README.md |
-| `soc_mpss_mem` | `(not found)` | **missing**: the tree has no node this was read from; see the table in devices/redwood/README.md |
-| `modem_ipa_fw_at` | `(not found)` | **missing**: the tree has no node this was read from; see the table in devices/redwood/README.md |
-| `soc_smem` | `0x80900000` |  |
-| `soc_imem` | `0x14600000` |  |
-| `soc_ipa_stream` | `0x440` |  |
-| `soc_ipa_stream_uc` | `0x442` |  |
-| `soc_pas_mpss` | `0x4` |  |
-| `soc_pas_ipa` | `0xf` |  |
-| `soc_ipa_fw` | `ipa_fws` |  |
+iOS's root volume lives in a partition of its own, `darwin`, carved from the end of `userdata`. **This wipes Android's data.** The
+loader and the kernel write nowhere else. The numbers are in the loader (`darwin_miatoll` in `xnuloader/loader.c`), the UFS driver and
+`tools/darwin-write.py`: put your phone's own (from `parted ... print`) in all three before you do it on another phone.
 
-`soc.args` is what `tools/soc-args.py` read out of the tree; `pull-soc.sh` makes it again from the phone on
-adb. The run scripts add it to the kernel command line. Where each argument comes from in the tree:
-`devices/redwood/README.md`.
+## Booting
 
-## What is this phone's own
-
-The kernel, loader and user space know nothing about a phone: addresses, interrupts, rails and firmware
-come from its tree and its Android. What is written for one phone is the list below. The head of each file
-says where its numbers came from; that is the map of what to rewrite.
-
-- [ ] **UEFI**: the firmware that starts the loader: devices/redwood/uefi/ is a port of Mu-Silicium; the vendor's drivers are extracted from your own phone (uefi/README.md)
-- [ ] **Display, buttons, touch**: drivers/input/hakios.input.c, hakios.buttons.c, hakios.goodix.c (the reference phone's controller; another phone has another)
-- [ ] **Storage**: hakios.ufs.c and hakios.ufshc.c (UFS); a phone with eMMC needs another driver
-- [ ] **CPU clocks**: hakios.cpufreq.c
-- [ ] **GPU**: hakios.adreno.c (Adreno 642L here: another generation needs its own firmware and registers)
-- [ ] **Wi-Fi**: hakios.wifi.c, hakios.lx.c and wifi/lx/ (the WCN6750 radio of the reference phone)
-- [ ] **Audio and battery**: hakios.adsp.c, hakios.audio.c, hakios.sound.c, hakios.speaker.c, hakios.mic.c, hakios.battery.c
-- [ ] **Cellular**: hakios.mpss.c, hakios.qmi.c, hakios.nas.c, hakios.ipa.c, hakios.cell.c; soc.args carries the addresses, the IPA layout is for IPA 4.11 (docs/cellular.md)
-- [ ] **Haptics and cameras**: hakios.haptic.c, hakios.camera.c
-
-## Configuration
-
-The kernel's settings are layered the way an Android kernel's are: the common kernel, the SoC's, this phone's
-(`docs/configs.md`). Two short files make this phone a configuration:
-
-    configs/miatoll.config          CONFIG_DEVICE="miatoll"   and whatever is true of this phone only
-    configs/miatoll_defconfig       #include common_defconfig
-                                   #include <the SoC's fragment: sc7280.config for the SC7280 family>
-                                   #include miatoll.config
-
-Then `make miatoll_defconfig`. Turn on only what this phone has been shown to do; `tools/hakios-config.py check` says what the
-choice needs.
-
-The drivers are part of the configuration too (`docs/drivers-config.md`): every one is built unless a configuration leaves it out,
-and the addresses, pins and rails in each are the reference phone's. Leave out in `configs/miatoll.config` what has not been
-ported to this phone yet (`# CONFIG_HAKIOS_GOODIX is not set`, ...; `configs/qemu_defconfig` leaves out all of them), and put
-each one back when it has been made to work here. `tools/hakios-config.py show` lists what is built in.
-
-## Firmware
-
-Pulled from your own phone, never committed: `devices/redwood/pull-firmware.sh`, or
-`pull-firmware-root.sh` where the firmware is readable by root only. Check with `make doctor`.
-
-## Before you open a pull request
-
-`tools/provenance-check.py` must pass: no vendor firmware, no UEFI drivers, no Apple files in the tree.
-
-## The repository
-
-A HakiOS device repository: what is true of this device and of no other. The kernel, the loader, the drivers and the tools are
-the common repository's; the sm7125 family's facts are in `soc/`, carried with the device. How the three are put together:
-[docs/porting/repositories.md](https://github.com/oosexgang/hakios/blob/main/docs/porting/repositories.md).
-
-| File | What |
-|---|---|
-| `device.conf` | what the device is, and how far each part of it works: its page in the documentation is made from it |
-| `configs/miatoll_defconfig` | the common kernel, the SoC's fragment, this device's: `make miatoll_defconfig` |
-| `configs/miatoll.config` | what is this device's own: the drivers built in, the arguments it needs |
-| `soc/` | its SoC family's layer (sm7125): `soc.conf`, `configs/sm7125.config`, the SoC's drivers; carried here so that this one repository is all the device needs |
-| `drivers/` | drivers of its own, if it needs any (`drivers/<subsystem>/conf`, as in the common repository) |
-
-Every phone driver of the common repository is left out to begin with: their addresses and pins are the phone they were written
-for. Put one back in `configs/miatoll.config` when it has been made to work here, and say so in `device.conf`.
-
-Check with `tools/hakios-device.py check miatoll`.
+The phone in fastboot (Power + Volume Down), then `DEVICE=miatoll ./xl ios` from the top of the tree. About a minute to the home
+screen. Hold Power + Volume Down to leave; settings are saved on the way.

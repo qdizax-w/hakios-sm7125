@@ -1,0 +1,11 @@
+# devices/miatoll/drivers/power/conf: the PM6150 and PM6150L of miatoll.
+
+driver MIATOLL_BATTERY
+	file    bsd/dev/hakios.miatoll_battery.c
+	help    the battery, from the PM6150's fuel gauge (QG) and charger, only read (qg=1); charge=1 also services the
+	help    charger's watchdog, the one register it writes
+
+driver MIATOLL_BACKLIGHT
+	file    bsd/dev/hakios.miatoll_backlight.c
+	help    iOS's brightness on the PM6150L's WLED, through /dev/hakios-backlight (backlight=2); writes the modulator's
+	help    level and sync registers and nothing else
