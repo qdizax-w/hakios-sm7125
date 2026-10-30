@@ -230,6 +230,20 @@ set_level(uint32_t value)
 	return true;
 }
 
+/* The level 0: the backlight off while iOS has the display off (set_level() never goes below LEVEL_MIN) */
+static bool
+set_level_dark(void)
+{
+	uint8_t sync = 0;
+
+	if (!put(brt_lsb, 0) || !put(brt_msb, 0) || !get(&sink, 0x65, &sync, 1) || !put(0x65, (uint8_t)(sync & ~0x03)) ||
+	    !put(0x65, (uint8_t)((sync & ~0x03) | sync_bit)) || !put(0x65, (uint8_t)(sync & ~0x03))) {
+		return false;
+	}
+	shown_level = 0;
+	return true;
+}
+
 /* iOS's 0..1000 -> a level: roughly perceptual (the square), LEVEL_MIN at 0 */
 static uint32_t
 level_for(uint32_t permille)
@@ -242,6 +256,17 @@ level_for(uint32_t permille)
 /* ---- /dev/hakios-backlight ---------------------------------------------------------------------- */
 
 static volatile uint32_t wanted = 0xffffffff;   /* nothing asked yet */
+static volatile bool dark;                      /* iOS has the display off (the screen locked): the backlight off too */
+
+/*
+ * iOS's display off and on (IOMobileFramebufferRequestPowerChange, MiniIOMobileFramebuffer.cpp): off, the WLED's level
+ * goes to 0 -- below LEVEL_MIN, which only the slider is kept above --, on, back to iOS's brightness.
+ */
+void
+hakios_display_power(int on)
+{
+	dark = !on;
+}
 
 static int
 bl_write(__unused dev_t dev, struct uio *uio, __unused int ioflag)
@@ -363,6 +388,24 @@ backlight_thread(__unused void *parameter, __unused wait_result_t result)
 	 */
 	while (!broken) {
 		uint32_t want = wanted;
+
+		if (dark) {
+			if (shown_level != 0) {
+				if (!set_level_dark()) {
+					break;
+				}
+				say("backlight: the display is off: the backlight too\n");
+			}
+			delay_for_interval(20, NSEC_PER_MSEC);
+			continue;
+		}
+		if (shown_level == 0) {
+			/* back on: from LEVEL_MIN up to iOS's level, eased as any change is (or the middle, if iOS has asked for none) */
+			if (!set_level(applied != 0xffffffff ? LEVEL_MIN : LEVEL_MAX / 2)) {
+				break;
+			}
+			say("backlight: the display is on again\n");
+		}
 
 		if (want != 0xffffffff && want != applied) {
 			if (changes++ < 5 || changes % 50 == 0) {
