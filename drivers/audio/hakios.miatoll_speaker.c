@@ -333,6 +333,7 @@ reg_write_on(struct bus *b, uint8_t reg, uint8_t value)
 #define VOLUME_FLOOR            (110 * 8)       /* -110 dB, the volume's lowest */
 
 static uint32_t volume_now = VOLUME_FLOOR;      /* eighths of a dB under 0 dB, as the chip has it */
+static uint8_t page_now;                        /* the page the last write to TAS_PAGE chose */
 
 static void
 give_up(const char *why)
@@ -364,8 +365,11 @@ put(uint8_t reg, uint8_t value)
 		give_up("a write was not acknowledged");
 		return false;
 	}
-	if (reg == TAS_SW_RESET || reg == TAS_PAGE) {
-		return true;
+	if (reg == TAS_PAGE) {
+		page_now = value;
+	}
+	if (reg == TAS_SW_RESET || reg == TAS_PAGE || page_now == 2) {
+		return true;            /* (page 2, the digital volume, reads back 0 until the whole of it is written: not checked) */
 	}
 	if (!reg_read_on(bus, reg, &back) || back != value) {
 		say("speaker: %#04x <- %#04x, reads %#04x: NOT AS WRITTEN\n", reg, value, back);
