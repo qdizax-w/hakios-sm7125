@@ -262,9 +262,15 @@ static volatile bool dark;                      /* iOS has the display off (the 
  * iOS's display off and on (IOMobileFramebufferRequestPowerChange, MiniIOMobileFramebuffer.cpp): off, the WLED's level
  * goes to 0 -- below LEVEL_MIN, which only the slider is kept above --, on, back to iOS's brightness.
  */
+extern void hakios_var_save_soon(void);        /* bsd/dev/hakios.ufs.c */
+
 void
 hakios_display_power(int on)
 {
+	/* the screen locked: the data volume saved too, so that a phone reset from here loses nothing */
+	if (!on && !dark) {
+		hakios_var_save_soon();
+	}
 	dark = !on;
 }
 
