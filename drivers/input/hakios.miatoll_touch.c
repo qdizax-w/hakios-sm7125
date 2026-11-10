@@ -1,15 +1,24 @@
 /*
- * The touch screen of miatoll's Huaxing panel (Redmi Note 9S / 9 Pro, SM7125): a FocalTech FT8756 in the
- * panel itself (touch and display driver in one chip), as a source of touches for /dev/hakios-touch
- * (sys/hakios.input.h). Only with boot-arg ft8756=1.
+ * The touch screen of miatoll (Redmi Note 9S / 9 Pro, SM7125), whichever panel the phone has, as a source of
+ * touches for /dev/hakios-touch (sys/hakios.input.h). Both panels put the touch controller in the panel's own
+ * chip (touch and display driver in one), on the same SPI pins, interrupt line and reset line; each needs its
+ * firmware loaded by the host at every boot. Which one the phone has is said by a boot-arg, not found out: a
+ * frame of one chip's protocol is a write in the other's, and a guess could write into the wrong chip.
  *
- * What the chip needs, from Xiaomi's driver for this phone (MiCode Xiaomi_Kernel_OpenSource, branch
- * curtana-q-oss, drivers/input/touchscreen/ft8756_spi) and its device tree:
+ *   ft8756=1   the Huaxing panel: FocalTech FT8756
+ *   nt36675=1  the Tianma panel:  Novatek NT36675
+ *
+ * Shared, from Xiaomi's kernel for this phone (MiCode Xiaomi_Kernel_OpenSource, branch curtana-q-oss) and its
+ * device tree (/soc/spi@a94000/touchscreen, compatible "focaltech,fts" "novatek,NVT-ts-spi"):
  *   power    none of ours: the chip is the panel's, powered with the display, which the UEFI has lit
  *   pins     SPI on TLMM GPIO 53 (MISO), 54 (MOSI), 55 (CLK), 56 (CS) -- the west tile -- driven by hand
  *            (mode 0, about 1 MHz against the 8 MHz its device tree allows: spi_transfer()); the interrupt line on
- *            GPIO 9 (north tile), low while a report waits. Reset (GPIO 8) is never touched: the panel
- *            would go dark with it
+ *            GPIO 9 (north tile). Reset (GPIO 8) is never touched: the panel would go dark with it (Xiaomi's
+ *            Novatek driver leaves it alone too, NVT_TOUCH_SUPPORT_HW_RST 0)
+ * Nothing here takes an interrupt: a thread looks at the interrupt line every few milliseconds, which it
+ * only reads; nothing else of the chip's or the panel's is written but the four SPI pins' configuration.
+ *
+ * FocalTech FT8756 (drivers/input/touchscreen/ft8756_spi):
  *   firmware the FT8756 keeps none: after power-up it waits in its boot ROM (chip ID reads ef ef, boot ID
  *            87 56, register 0xd0 = 1) for the host to load it -- Xiaomi's fts_fw_recovery(): code into
  *            PRAM and constants into DRAM, each checked with the ROM's ECC, then started (0x08), with no
@@ -21,8 +30,24 @@
  *   reports  register 0x01: 0x9N, the number of points, then 6 bytes a point (event in bits 7..6 and x
  *            bits 11..8, x 7..0, id in bits 7..4 and y bits 11..8, y 7..0, pressure, area), in pixels
  *            of the 1080 x 2400 screen; "ef ef ef" there means the chip has lost its firmware
- * Nothing here takes an interrupt: a thread looks at the interrupt line every few milliseconds, which it
- * only reads; nothing else of the chip's or the panel's is written but the four SPI pins' configuration.
+ *   line     low while a report waits (falling edge)
+ *
+ * Novatek NT36675 (drivers/input/touchscreen/nt36xxx_spi):
+ *   frames   a byte of offset (bit 7 set to write, clear to read) into a 128-byte window that a write of
+ *            0xff, address >> 15, address >> 7 places (nvt_set_page); a read gives a dummy byte, then the data
+ *   chip     after an "eng" reset (0x7fff80 = 0x5a) and a boot loader reset (0x3f0fe = 0x69, the device tree's
+ *            swrst-n8-addr; then 0x3f310 = 0, spi-rd-fast-addr) its trim ID at 0x1f64e is .. .. .. 75 66 03
+ *   firmware none kept ("phase 2 host download", hardware CRC): the image's partitions (ILM, DLM, the info
+ *            sections, the overlays, each with its SRAM address and CRC in the image's header) go into its
+ *            SRAM, the ILM's and DLM's place, length and CRC into the boot loader's registers, CRC checking on,
+ *            boot ready (0x3f10d = 1); it then says 0xa0 or above at event buffer + 0x60. The image is
+ *            Xiaomi's novatek_ts_tianma_fw.bin from the phone's /vendor/firmware (pull-firmware.sh),
+ *            fw/nt36675.bin in the small image
+ *   reports  65 bytes at the event buffer (0x22d00): 6 bytes a point, id in bits 7..3 of the first (1 to 10)
+ *            and its state in bits 2..0 (1 down, 2 moving), x = b1 << 4 | b3 >> 4, y = b2 << 4 | b3 & 15,
+ *            in the range its firmware info (event buffer + 0x78) gives; ten reads of fd/fe in a row mean
+ *            its watchdog reset it, and the firmware is loaded again (NVT_TOUCH_WDT_RECOVERY)
+ *   line     high while a report waits (rising edge: the device tree's irq flags 0x2001)
  */
 #include <kern/clock.h>
 #include <kern/thread.h>
@@ -98,11 +123,15 @@ pin_get(unsigned pin)
 #define TLMM_INTR_CFG           0x8
 #define TLMM_INTR_STATUS        0xc
 #define TLMM_INTR_FALLING       (1u << 1 | 2u << 2 | 1u << 4 | 3u << 5) /* polarity, edge, raw status, to the apps processors */
+#define TLMM_INTR_RISING        (1u << 1 | 1u << 2 | 1u << 4 | 3u << 5) /* (msm_gpio_irq_set_type: detection 1, not 2) */
+
+static bool line_active_high;   /* the Novatek's line is high while a report waits, the FocalTech's low */
 
 static void
-interrupt_catch(void)
+interrupt_catch(bool rising)
 {
-	wr(int_pin + TLMM_INTR_CFG, TLMM_INTR_FALLING);
+	line_active_high = rising;
+	wr(int_pin + TLMM_INTR_CFG, rising ? TLMM_INTR_RISING : TLMM_INTR_FALLING);
 	wr(int_pin + TLMM_INTR_STATUS, 0);
 }
 
@@ -114,7 +143,7 @@ interrupt_pending(void)
 	if (caught) {
 		wr(int_pin + TLMM_INTR_STATUS, 0);
 	}
-	return caught || !(rd(int_pin + 4) & 1);
+	return caught || (bool)(rd(int_pin + 4) & 1) == line_active_high;
 }
 
 /* ---- SPI by hand -------------------------------------------------------------------------------------- */
@@ -441,6 +470,43 @@ static struct {
 
 static uint64_t reports_read, reports_bad;
 
+/* a finger seen at (x, y), already scaled to 0..65535 */
+static void
+contact_seen(unsigned id, uint32_t x, uint32_t y)
+{
+	if (!contact[id].down) {
+		contact[id].down = true;
+		hakios_touch_post(HAKIOS_TOUCH_DOWN, id, x, y);
+	} else if (contact[id].x != x || contact[id].y != y) {
+		hakios_touch_post(HAKIOS_TOUCH_MOVE, id, x, y);
+	}
+	contact[id].x = x;
+	contact[id].y = y;
+}
+
+/* every finger down that the last report did not have is lifted */
+static void
+contacts_lift_unseen(const bool *seen)
+{
+	for (unsigned id = 0; id < MAX_POINTS; id++) {
+		if (contact[id].down && !seen[id]) {
+			contact[id].down = false;
+			hakios_touch_post(HAKIOS_TOUCH_UP, id, contact[id].x, contact[id].y);
+		}
+	}
+}
+
+static bool
+contacts_any_down(void)
+{
+	for (unsigned id = 0; id < MAX_POINTS; id++) {
+		if (contact[id].down) {
+			return true;
+		}
+	}
+	return false;
+}
+
 /* false: the chip has lost its firmware (reads ef ef ef) */
 static bool
 report_read(void)
@@ -479,21 +545,9 @@ report_read(void)
 		x = x * 65535 / (SCREEN_WIDTH - 1);
 		y = y * 65535 / (SCREEN_HEIGHT - 1);
 		seen[id] = true;
-		if (!contact[id].down) {
-			contact[id].down = true;
-			hakios_touch_post(HAKIOS_TOUCH_DOWN, id, x, y);
-		} else if (contact[id].x != x || contact[id].y != y) {
-			hakios_touch_post(HAKIOS_TOUCH_MOVE, id, x, y);
-		}
-		contact[id].x = x;
-		contact[id].y = y;
+		contact_seen(id, x, y);
 	}
-	for (unsigned id = 0; id < MAX_POINTS; id++) {
-		if (contact[id].down && !seen[id]) {
-			contact[id].down = false;
-			hakios_touch_post(HAKIOS_TOUCH_UP, id, contact[id].x, contact[id].y);
-		}
-	}
+	contacts_lift_unseen(seen);
 	return true;
 }
 
@@ -509,15 +563,10 @@ touch_thread(__unused void *arg, __unused wait_result_t wr)
 		return;
 	}
 	printf("ft8756: touch screen ready (1080 x 2400)\n");
-	interrupt_catch();
+	interrupt_catch(false);
 	for (;;) {
-		bool any_down = false;
-
-		for (unsigned id = 0; id < MAX_POINTS; id++) {
-			any_down |= contact[id].down;
-		}
 		/* (and while a finger is down, every time: a lift whose report was missed is not left standing) */
-		if (interrupt_pending() || any_down) {
+		if (interrupt_pending() || contacts_any_down()) {
 			if (!report_read()) {
 				printf("ft8756: the chip lost its firmware: loading it again\n");
 				if (!chip_ready()) {
@@ -535,22 +584,391 @@ touch_thread(__unused void *arg, __unused wait_result_t wr)
 	thread_terminate(current_thread());
 }
 
+/* ---- Novatek NT36675 (the Tianma panel): frames ---------------------------------------------------------- */
+
+#define NVT_CHUNK               4096    /* bytes of one SPI write (Xiaomi's driver: up to 63 KB; any size will do) */
+#define NVT_ENG_RST_ADDR        0x7fff80
+#define NVT_SWRST_N8_ADDR       0x3f0fe /* dt: novatek,swrst-n8-addr */
+#define NVT_SPI_RD_FAST_ADDR    0x3f310 /* dt: novatek,spi-rd-fast-addr */
+#define NVT_TRIM_ID_ADDR        0x1f64e
+/* NT36675_memory_map (nt36xxx_mem_map.h) */
+#define NVT_EVENT_BUF_ADDR      0x22d00
+#define NVT_BOOT_RDY_ADDR       0x3f10d
+#define NVT_ILM_LENGTH_ADDR     0x3f118
+#define NVT_DLM_LENGTH_ADDR     0x3f130
+#define NVT_ILM_DES_ADDR        0x3f128
+#define NVT_DLM_DES_ADDR        0x3f12c
+#define NVT_G_ILM_CHECKSUM_ADDR 0x3f100
+#define NVT_G_DLM_CHECKSUM_ADDR 0x3f104
+#define NVT_BLD_CRC_EN_ADDR     0x3f30e
+/* the event buffer's map */
+#define NVT_EVENT_HOST_CMD      0x50
+#define NVT_EVENT_RESET_DONE    0x60
+#define NVT_EVENT_FWINFO        0x78
+#define NVT_RESET_STATE_INIT    0xa0
+#define NVT_RESET_STATE_MAX     0xaf
+#define NVT_POINT_DATA_LEN      65
+
+static uint8_t nvt_tx[1 + NVT_CHUNK + 1], nvt_rx[sizeof(nvt_tx)];
+
+/* CTP_SPI_WRITE: the offset byte with bit 7 set, then the data */
+static void
+nvt_write(uint8_t offset, const uint8_t *data, uint32_t length)
+{
+	nvt_tx[0] = offset | 0x80;
+	memcpy(nvt_tx + 1, data, length);
+	spi_transfer(nvt_tx, nvt_rx, 1 + length);
+}
+
+/* CTP_SPI_READ: the offset byte, a dummy byte back, then the data */
+static void
+nvt_read(uint8_t offset, uint8_t *data, uint32_t length)
+{
+	memset(nvt_tx, 0, 2 + length);
+	nvt_tx[0] = offset & 0x7f;
+	spi_transfer(nvt_tx, nvt_rx, 2 + length);
+	memcpy(data, nvt_rx + 2, length);
+}
+
+/* nvt_set_page: the 128-byte window at address */
+static void
+nvt_set_page(uint32_t address)
+{
+	uint8_t page[2] = { (uint8_t)(address >> 15), (uint8_t)(address >> 7) };
+
+	nvt_write(0x7f, page, sizeof(page));    /* (0xff with bit 7 already set) */
+}
+
+static void
+nvt_write_addr(uint32_t address, uint8_t value)
+{
+	nvt_set_page(address);
+	nvt_write(address & 0x7f, &value, 1);
+}
+
+static void
+nvt_bootloader_reset(void)
+{
+	nvt_write_addr(NVT_SWRST_N8_ADDR, 0x69);
+	sleep_ms(5);
+	nvt_write_addr(NVT_SPI_RD_FAST_ADDR, 0x00);
+}
+
+/* nvt_ts_check_chip_ver_trim(), for the NT36675 alone */
+static bool
+nvt_chip_is_nt36675(void)
+{
+	uint8_t id[6];
+
+	for (int attempt = 0; attempt < 5; attempt++) {
+		nvt_bootloader_reset();
+		nvt_set_page(NVT_TRIM_ID_ADDR);
+		nvt_read(NVT_TRIM_ID_ADDR & 0x7f, id, sizeof(id));
+		if (id[3] == 0x75 && id[4] == 0x66 && id[5] == 0x03) {
+			return true;
+		}
+		printf("nt36675: trim ID %02x %02x %02x %02x %02x %02x\n", id[0], id[1], id[2], id[3], id[4], id[5]);
+		sleep_ms(10);
+	}
+	return false;
+}
+
+/* ---- Novatek: the firmware (nt36xxx_fw_update.c: nvt_bin_header_parser, nvt_download_firmware_hw_crc) ------ */
+
+#define NVT_MAX_PARTITIONS      32
+
+struct nvt_partition {
+	uint32_t bin, sram, size, crc;
+};
+
+static uint32_t
+le32_at(const uint8_t *p)
+{
+	return p[0] | (uint32_t)p[1] << 8 | (uint32_t)p[2] << 16 | (uint32_t)p[3] << 24;
+}
+
+/* the image's partitions: ILM and DLM, the info sections, the overlays; 0 if the image is not one */
+static unsigned
+nvt_partitions(const uint8_t *fw, uint64_t size, struct nvt_partition *part)
+{
+	uint32_t end, info = 0, overlays, n, need = 0;
+
+	if (size < 0x1000) {
+		return 0;
+	}
+	/* nvt_get_fw_need_write_size(): the last 4 KB sector that ends in "NVT" or "MOD"; its version byte and bar */
+	for (uint64_t sector = size / 0x1000; sector > 0; sector--) {
+		const uint8_t *flag = fw + sector * 0x1000 - 3;
+
+		if (memcmp(flag, "NVT", 3) == 0 || memcmp(flag, "MOD", 3) == 0) {
+			need = (uint32_t)(sector * 0x1000);
+			break;
+		}
+	}
+	if (need == 0 || (uint8_t)(fw[need - 0x1000] + fw[need - 0x1000 + 1]) != 0xff) {
+		return 0;
+	}
+	end = le32_at(fw);
+	for (uint32_t pos = 0x30; pos < end; pos += 0x10) {
+		info++;
+	}
+	overlays = (fw[0x28] & 0x10) ? (fw[0x28] & 0x0f) : 0;
+	n = 2 + info + overlays;
+	if (n > NVT_MAX_PARTITIONS || 0x30 + 0x10 * info > size) {
+		return 0;
+	}
+	for (uint32_t i = 0; i < n; i++) {
+		const uint8_t *h;
+
+		if (i < 2) {                                            /* BIN, SRAM, size; the CRC at 0x18 + 4i */
+			h = fw + 12 * i;
+			part[i].bin = le32_at(h);
+			part[i].sram = le32_at(h + 4);
+			part[i].size = le32_at(h + 8);
+			part[i].crc = le32_at(fw + 0x18 + 4 * i);
+			continue;
+		}
+		if (i < 2 + info) {                                     /* SRAM, size, BIN, CRC */
+			h = fw + 0x30 + 0x10 * (i - 2);
+		} else {                                                /* the same, at the DLM's start */
+			uint64_t at = (uint64_t)part[1].bin + 0x10 * (i - 2 - info);
+
+			if (at + 0x10 > size) {
+				return 0;
+			}
+			h = fw + at;
+		}
+		part[i].sram = le32_at(h);
+		part[i].size = le32_at(h + 4);
+		part[i].bin = le32_at(h + 8);
+		part[i].crc = le32_at(h + 12);
+	}
+	for (uint32_t i = 0; i < n; i++) {
+		if ((uint64_t)part[i].bin + part[i].size > size) {
+			return 0;
+		}
+	}
+	return n;
+}
+
+/* nvt_set_bld_crc_bank(): where a partition goes, its length and its CRC, for the boot loader to check */
+static void
+nvt_crc_bank(uint32_t des_addr, uint32_t length_addr, uint32_t checksum_addr, const struct nvt_partition *p)
+{
+	uint8_t des[3] = { (uint8_t)p->sram, (uint8_t)(p->sram >> 8), (uint8_t)(p->sram >> 16) };
+	uint8_t length[3] = { (uint8_t)p->size, (uint8_t)(p->size >> 8), (uint8_t)((p->size >> 16) & 1) };
+	uint8_t crc[4] = { (uint8_t)p->crc, (uint8_t)(p->crc >> 8), (uint8_t)(p->crc >> 16), (uint8_t)(p->crc >> 24) };
+
+	nvt_set_page(des_addr);         /* (the three are in one window) */
+	nvt_write(des_addr & 0x7f, des, sizeof(des));
+	nvt_write(length_addr & 0x7f, length, sizeof(length));
+	nvt_write(checksum_addr & 0x7f, crc, sizeof(crc));
+}
+
+static bool
+nvt_fw_load(void)
+{
+	static struct nvt_partition part[NVT_MAX_PARTITIONS];
+	uint64_t size = 0;
+	const uint8_t *fw = hakios_image_file("fw", "nt36675.bin", &size, NULL);
+	unsigned n;
+	uint8_t value, state[5];
+
+	if (fw == NULL) {
+		printf("nt36675: no fw/nt36675.bin in the small image (pull-firmware.sh, then userland/build.sh)\n");
+		return false;
+	}
+	n = nvt_partitions(fw, size, part);
+	if (n == 0) {
+		printf("nt36675: fw/nt36675.bin (%llu bytes) is not a firmware image for it\n", size);
+		return false;
+	}
+	printf("nt36675: loading the firmware: %llu bytes, %u partitions\n", size, n);
+	nvt_bootloader_reset();
+	for (unsigned i = 0; i < n; i++) {
+		/* (one byte more than the header says, as Xiaomi's driver writes it; never past the image) */
+		uint32_t left = part[i].size == 0 ? 0 : (uint32_t)MIN((uint64_t)part[i].size + 1, size - part[i].bin);
+		uint32_t sram = part[i].sram, bin = part[i].bin;
+
+		while (left > 0) {
+			uint32_t chunk = MIN(left, NVT_CHUNK);
+
+			nvt_set_page(sram);
+			nvt_write(sram & 0x7f, fw + bin, chunk);
+			sram += chunk;
+			bin += chunk;
+			left -= chunk;
+		}
+	}
+	nvt_crc_bank(NVT_ILM_DES_ADDR, NVT_ILM_LENGTH_ADDR, NVT_G_ILM_CHECKSUM_ADDR, &part[0]);
+	nvt_crc_bank(NVT_DLM_DES_ADDR, NVT_DLM_LENGTH_ADDR, NVT_G_DLM_CHECKSUM_ADDR, &part[1]);
+	/* nvt_bld_crc_enable() */
+	nvt_set_page(NVT_BLD_CRC_EN_ADDR);
+	nvt_read(NVT_BLD_CRC_EN_ADDR & 0x7f, &value, 1);
+	value |= 0x80;
+	nvt_write(NVT_BLD_CRC_EN_ADDR & 0x7f, &value, 1);
+	/* nvt_fw_crc_enable(): the reset state cleared, firmware CRC checking on */
+	nvt_set_page(NVT_EVENT_BUF_ADDR);
+	value = 0x00;
+	nvt_write(NVT_EVENT_RESET_DONE, &value, 1);
+	value = 0xae;
+	nvt_write(NVT_EVENT_HOST_CMD, &value, 1);
+	/* nvt_boot_ready() */
+	nvt_write_addr(NVT_BOOT_RDY_ADDR, 1);
+	sleep_ms(5);
+	/* nvt_check_fw_reset_state(RESET_STATE_INIT) */
+	nvt_set_page(NVT_EVENT_BUF_ADDR | NVT_EVENT_RESET_DONE);
+	for (int i = 0; i <= 10; i++) {
+		nvt_read(NVT_EVENT_RESET_DONE, state, sizeof(state));
+		if (state[0] >= NVT_RESET_STATE_INIT && state[0] <= NVT_RESET_STATE_MAX) {
+			return true;
+		}
+		sleep_ms(10);
+	}
+	printf("nt36675: the firmware did not start (reset state %02x %02x %02x %02x %02x)\n",
+	    state[0], state[1], state[2], state[3], state[4]);
+	return false;
+}
+
+/* ---- Novatek: reports ------------------------------------------------------------------------------------- */
+
+static uint32_t nvt_x_max = SCREEN_WIDTH, nvt_y_max = SCREEN_HEIGHT;
+static unsigned nvt_watchdog_reads;
+
+/* nvt_get_fw_info(): its version and coordinate range; then the window back on the event buffer */
+static void
+nvt_fw_info(void)
+{
+	uint8_t info[16];
+
+	nvt_set_page(NVT_EVENT_BUF_ADDR | NVT_EVENT_FWINFO);
+	nvt_read(NVT_EVENT_FWINFO, info, sizeof(info));
+	if ((uint8_t)(info[0] + info[1]) == 0xff) {
+		nvt_x_max = (uint32_t)info[4] << 8 | info[5];
+		nvt_y_max = (uint32_t)info[6] << 8 | info[7];
+		printf("nt36675: firmware 0x%02x, %u x %u\n", info[0], nvt_x_max, nvt_y_max);
+	} else {
+		printf("nt36675: no firmware info (%02x %02x): %u x %u taken\n", info[0], info[1], SCREEN_WIDTH, SCREEN_HEIGHT);
+	}
+	if (nvt_x_max < 2 || nvt_y_max < 2) {
+		nvt_x_max = SCREEN_WIDTH;
+		nvt_y_max = SCREEN_HEIGHT;
+	}
+	nvt_set_page(NVT_EVENT_BUF_ADDR);
+}
+
+static bool
+nvt_start(void)
+{
+	/* the "eng" reset, then 10 ms, as the probe does it; the ID; the firmware */
+	nvt_write_addr(NVT_ENG_RST_ADDR, 0x5a);
+	sleep_ms(11);
+	if (!nvt_chip_is_nt36675()) {
+		printf("nt36675: not an NT36675 on SPI (GPIO %u-%u): is this the Huaxing panel (ft8756=1)?\n", PIN_MISO, PIN_CS);
+		return false;
+	}
+	for (int attempt = 0; attempt < 3; attempt++) {
+		if (nvt_fw_load()) {
+			nvt_fw_info();
+			return true;
+		}
+	}
+	return false;
+}
+
+/* false: its watchdog reset it, and the firmware is to be loaded again */
+static bool
+nvt_report_read(void)
+{
+	uint8_t r[NVT_POINT_DATA_LEN];
+	bool seen[MAX_POINTS] = { false }, watchdog = true;
+
+	nvt_read(0x00, r, sizeof(r));
+	for (unsigned i = 0; i < 6; i++) {
+		watchdog &= r[i] == 0xfd || r[i] == 0xfe;
+	}
+	if (watchdog) {
+		return ++nvt_watchdog_reads <= 10;
+	}
+	nvt_watchdog_reads = 0;
+	reports_read++;
+	for (unsigned i = 0; i < MAX_POINTS; i++) {
+		const uint8_t *p = r + 6 * i;
+		unsigned slot = p[0] >> 3, state = p[0] & 7;
+		uint32_t x = (uint32_t)p[1] << 4 | p[3] >> 4, y = (uint32_t)p[2] << 4 | (p[3] & 0x0f);
+
+		if (slot == 0 || slot > MAX_POINTS || (state != 1 && state != 2)) {
+			continue;               /* (an empty slot, a lift, or a packet of another kind: palm, gesture) */
+		}
+		if (x > nvt_x_max || y > nvt_y_max) {
+			continue;
+		}
+		seen[slot - 1] = true;
+		contact_seen(slot - 1, x * 65535 / nvt_x_max, y * 65535 / nvt_y_max);
+	}
+	contacts_lift_unseen(seen);
+	return true;
+}
+
+static void
+nvt_thread(__unused void *arg, __unused wait_result_t wr)
+{
+	uint64_t last_line = 0;
+
+	spi_init();
+	if (!nvt_start()) {
+		printf("nt36675: no touch screen\n");
+		thread_terminate(current_thread());
+		return;
+	}
+	printf("nt36675: touch screen ready\n");
+	interrupt_catch(true);
+	for (;;) {
+		/* (and while a finger is down, every time: a lift whose report was missed is not left standing) */
+		if (interrupt_pending() || contacts_any_down()) {
+			if (!nvt_report_read()) {
+				printf("nt36675: its watchdog reset it: loading the firmware again\n");
+				nvt_watchdog_reads = 0;
+				if (!nvt_fw_load()) {
+					printf("nt36675: no touch screen any more\n");
+					break;
+				}
+				nvt_fw_info();
+			}
+		}
+		if (reports_read >= last_line + 1000) {
+			last_line = reports_read;
+			printf("nt36675: %llu reports\n", reports_read);
+		}
+		sleep_ms(4);
+	}
+	thread_terminate(current_thread());
+}
+
+/* ---- start ------------------------------------------------------------------------------------------------ */
+
 void
 hakios_miatoll_touch_init(void)
 {
-	uint32_t enabled = 0;
+	uint32_t ft8756 = 0, nt36675 = 0;
 	thread_t thread;
 
-	if (!PE_parse_boot_argn("ft8756", &enabled, sizeof(enabled)) || !enabled) {
+	PE_parse_boot_argn("ft8756", &ft8756, sizeof(ft8756));
+	PE_parse_boot_argn("nt36675", &nt36675, sizeof(nt36675));
+	if (!ft8756 && !nt36675) {
+		return;
+	}
+	if (ft8756 && nt36675) {
+		printf("miatoll touch: ft8756=1 and nt36675=1 both: a phone has one panel, so neither is started\n");
 		return;
 	}
 	spi_pins = ml_io_map(TLMM_WEST_PHYS + 0x1000UL * PIN_MISO, 0x1000UL * (PIN_CS - PIN_MISO + 1));
 	int_pin = ml_io_map(TLMM_NORTH_PHYS + 0x1000UL * PIN_INT, 0x1000UL);
 	if (spi_pins == 0 || int_pin == 0) {
-		printf("ft8756: cannot map the pins\n");
+		printf("miatoll touch: cannot map the pins\n");
 		return;
 	}
-	if (kernel_thread_start(touch_thread, NULL, &thread) == KERN_SUCCESS) {
+	if (kernel_thread_start(ft8756 ? touch_thread : nvt_thread, NULL, &thread) == KERN_SUCCESS) {
 		thread_deallocate(thread);
 	}
 }
