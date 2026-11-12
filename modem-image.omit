@@ -1,0 +1,32 @@
+# MODEM_IMAGE_OMIT for userland/build.sh: what of the phone's firmware partition (fw-modem/image) the modem never reads
+# over TFTP, left out of a RAM boot's system image, which a 4 GB phone has no room for. Kept: modem_pr/ (its mcfg
+# configurations), wlanmdsp.mbn (the WCN3990's firmware), bdwlan* (its board data), qdsp6m.qdb and the rest.
+# A file the modem asks for and does not find is logged: "mpss: tftp: the modem reads ... NOT HERE".
+
+# the modem's own image: loaded from fw/modem.mdt and fw/modem.bNN by hakios.mpss.c, not over TFTP
+modem.mdt
+modem.b??
+# the other processors: audio DSP, compute DSP, NPU, video
+adsp.*
+cdsp.*
+npu.*
+venus.*
+# Android's TrustZone applications (fingerprint, DRM, payments, keys): loaded by Android's qseecomd, never by the modem
+goodixfp.*
+fpctzapp.*
+smplap32.*
+smplap64.*
+mfido.*
+haventkn.*
+widevine.*
+mlipay.*
+gptest.*
+hdcp1.*
+hdcp2p2.*
+hdcpsrm.*
+cardapp.*
+vsimapp.*
+securemm.*
+secauth.*
+soter64.*
+rtic.*
